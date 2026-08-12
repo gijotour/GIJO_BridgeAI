@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GIJO_BridgeAI - 진짜 SSH2 원격 서버 자원 수집 시스템</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header / Navbar -->
+    <header class="navbar">
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <span class="logo-text">GIJO_<span class="highlight">BridgeAI</span></span>
+        <span class="badge-tag">진짜 SSH2 포트 22 실시간 수집</span>
+      </div>
+      
+      <div class="mode-toggle-group">
+        <button id="btnModeClient" class="toggle-btn active" onclick="switchMode('client')">
+          💻 외출용 노트북 (클라이언트)
+        </button>
+        <button id="btnModeHost" class="toggle-btn" onclick="switchMode('host')">
+          🖥️ 집 AI 서버 (GPU 호스트)
+        </button>
+      </div>
+
+      <div class="user-profile">
+        <span class="user-status-dot connected"></span>
+        <span class="user-name" id="userAuthTag">SSH2 세션 미연결</span>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="content-grid">
+      
+      <!-- Left Panel: Connection Controls -->
+      <section class="card control-card">
+        <div class="card-header">
+          <h2>진짜 원격 GPU 서버 SSH 접속 (Port 22)</h2>
+          <span class="tooltip-icon" title="10.8.0.12 PC의 실제 SSH 계정 ID와 비밀번호를 입력하면, 22번 포트로 직접 SSH 접속하여 nvidia-smi 명령을 실행해 진짜 자원을 읽어옵니다.">ⓘ</span>
+        </div>
+
+        <div class="connection-status-box" id="statusBox">
+          <div class="status-indicatorDisconnected" id="statusDot"></div>
+          <div class="status-info">
+            <span class="status-title" id="statusTitle">진짜 SSH 미연결</span>
+            <span class="status-sub" id="statusSub">원격 10.8.0.12 PC의 진짜 SSH 계정을 입력해 접속하세요</span>
+          </div>
+        </div>
+
+        <!-- ID / PW Real SSH Form -->
+        <div class="auth-form-card">
+          <div class="form-group">
+            <label for="inputHostIp">원격 GPU 서버 IP 및 SSH 포트</label>
+            <div class="input-with-button">
+              <input type="text" id="inputHostIp" value="10.8.0.12" placeholder="예: 10.8.0.12">
+              <input type="text" id="inputPort" value="22" placeholder="22" style="width: 70px;">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="inputUsername">실제 원격 계정 ID (Username)</label>
+            <input type="text" id="inputUsername" placeholder="예: root 또는 사용자명">
+          </div>
+
+          <div class="form-group">
+            <label for="inputPassword">실제 원격 계정 비밀번호 (Password)</label>
+            <input type="password" id="inputPassword" placeholder="비밀번호 입력">
+          </div>
+        </div>
+
+        <div class="action-buttons">
+          <button id="btnConnect" class="btn-primary" onclick="toggleConnect()">
+            🔑 진짜 SSH 접속 및 실시간 GPU 자원 읽어오기
+          </button>
+        </div>
+
+        <div class="local-proxy-banner">
+          <div class="banner-title">💻 내 노트북 로컬 API 프록시 (Base URL)</div>
+          <div class="code-box">
+            <code>http://localhost:3000/v1</code>
+            <button class="btn-copy" onclick="copyProxyUrl()">복사</button>
+          </div>
+          <p class="banner-desc">VS Code Continue, Cursor, Python 코드의 Base URL에 이 주소를 입력하시면, 노트북 VRAM 소비 0MB로 SSH 접속된 원격 서버에서 연산이 실행됩니다.</p>
+        </div>
+      </section>
+
+      <!-- Right Panel: Monitoring & Real Telemetry -->
+      <section class="card telemetry-card">
+        <div class="card-header">
+          <h2>SSH2 커맨드 실제 읽어온 자원 (Real Telemetry)</h2>
+          <span class="live-tag">SSH2 REAL LIVE</span>
+        </div>
+
+        <div class="gpu-spec-header">
+          <div class="gpu-icon">🧠</div>
+          <div class="gpu-details">
+            <div class="gpu-name" id="gpuName">SSH 접속 후 진짜 하드웨어 읽어오는 중...</div>
+            <div class="gpu-location" id="gpuArch">구조: SSH 접속 필요</div>
+          </div>
+        </div>
+
+        <!-- VRAM Usage Progress Bar -->
+        <div class="vram-meter-container">
+          <div class="meter-label">
+            <span>원격 서버 실측 VRAM 사용량</span>
+            <span id="vramText" class="vram-val">0 GB / 0 GB</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill" id="vramProgress" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- Telemetry Stats Grid -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon">🔑</div>
+            <div class="stat-value" id="valAuthStatus">미연결</div>
+            <div class="stat-label">SSH2 접속 상태</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon">💾</div>
+            <div class="stat-value" id="valFreeVram">0.0 GB</div>
+            <div class="stat-label">실제 남아있는 VRAM</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon">🌡️</div>
+            <div class="stat-value" id="valTemp">0 °C</div>
+            <div class="stat-label">실제 GPU 온도</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon">💻</div>
+            <div class="stat-value">노트북 VRAM 0 MB</div>
+            <div class="stat-label">내 노트북 부하 Zero</div>
+          </div>
+        </div>
+
+        <!-- HuggingFace Recommendation Section -->
+        <div class="hf-recommendation-section">
+          <div class="hf-header">
+            <span class="hf-title">🤗 HuggingFace 남은 VRAM 기반 스마트 AI 모델 추천</span>
+            <button class="btn-sm" onclick="loadHfRecommendations()">↻ 새로고침</button>
+          </div>
+          <p class="hf-subtext">SSH2로 읽어온 <strong>원격 서버의 실시간 남은 가용 VRAM</strong>을 자동 계산하여 구동 가능한 모델만 매칭합니다.</p>
+
+          <div class="hf-model-list" id="hfModelList">
+            <div class="hf-loading">SSH 연결 후 VRAM이 수집되면 모델이 매칭됩니다.</div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>© 2026 GIJO_BridgeAI Corp. - 진짜 SSH2 22번 포트 실시간 GPU 자원 수집 플랫폼</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
