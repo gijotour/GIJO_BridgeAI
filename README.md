@@ -1,58 +1,68 @@
 # GIJO_BridgeAI
 
-> **한국형 원클릭 원격 GPU VRAM 오프로드 & P2P 릴레이 솔루션**  
-> **(Remote VRAM / GPU Offloading Platform for NVIDIA GB10, Mac M4 & RTX Workstations)**
+> 노트북에서 원격 GPU 서버에 SSH로 연결해 남은 GPU 메모리를 보고, AI 연산 요청을 그 서버로 넘기는 연결 도구
 
-`GIJO_BridgeAI`는 VRAM 및 메모리가 부족한 외출용 노트북/클라이언트 PC에서 집에 24시간 항시 켜둔 하이엔드 AI 전용 홈 서버(NVIDIA GB10, Mac Studio M4 128GB, Dual RTX 4090 등)의 자원을 **네트워크(WireGuard/P2P VPN/SSH)**를 통해 로컬 VRAM처럼 연결하여 연산을 위임하는 **가상 GPU 브릿지 플랫폼**입니다.
-
----
-
-## 🔥 Key Features
-
-1. **로컬 VRAM 소비 0 MB (Zero-Local VRAM Offload)**:
-   - 내 노트북의 로컬 API 프록시 (`http://localhost:3000/v1` 또는 `/ollama`)로 요청을 보내면, 연산을 원격 호스트 PC로 자동 라우팅합니다.
-   - VS Code Continue, Cursor AI, Python 딥러닝 스크립트 코드 수정 없이 클릭 한 번으로 연계 가능합니다.
-
-2. **🤗 HuggingFace 남은 VRAM 기반 스마트 AI 모델 추천**:
-   - 원격 GPU/통합 메모리의 **실시간 남은 가용 VRAM**을 계산하여 구동 가능한 모델만 초록색으로 자동 매칭 및 **원클릭 배포**를 지원합니다.
-
-3. **📡 WebRTC UDP P2P DataChannel & WireGuard 커널 핑 모니터링**:
-   - 단순 ICMP Ping의 한계를 넘어, UDP 소켓 기반 무소음 하트비트로 RTT 지연시간(ms), Jitter, 패킷 손실률(Loss %)을 0.1ms 단위로 정밀 측정합니다.
-
-4. **🔑 SSH2 (Port 22) 진짜 원격 자원 수집 엔진**:
-   - 원격 PC의 계정 ID/PW를 통한 안전한 SSH2 핸드셰이크를 거쳐 원격 서버 내부의 `nvidia-smi` / `sysctl` 실측 자원만 오차 없이 수집합니다.
+`GIJO_BridgeAI`는 메모리가 부족한 노트북이나 일반 PC에서, 집이나 사무실에 둔 GPU 서버로 AI 연산 요청을 넘기도록 돕는 브라우저 대시보드와 로컬 프록시입니다. 내 PC에서 직접 실행해 씁니다.
 
 ---
 
-## 🛠️ Tech Stack
+## 하는 일
 
-- **Backend**: Node.js, Express, `http-proxy`, `ssh2`, `ws` (WebSockets/WebRTC DataChannel Simulator)
-- **Frontend**: Vanilla JavaScript (ES6+), Modern Glassmorphism Dark UI / CSS3, HTML5
-- **Telemetry**: `nvidia-smi` (NVIDIA CUDA), `sysctl` (Apple Silicon Metal/MLX)
+1. **원격 GPU 서버 SSH 연결과 자원 조회**
+   - 서버 주소와 SSH 계정으로 접속해 `nvidia-smi` 로 GPU 이름, 전체·사용·남은 VRAM, 온도를 읽습니다.
+   - 연결된 동안 5초마다 다시 읽어 대시보드에 반영합니다.
+   - `nvidia-smi` 가 없는 서버에서는 값을 지어내지 않고 「확인 불가」로 표시합니다.
+
+2. **로컬 프록시로 AI 연산 요청 전달**
+   - `http://localhost:3000/v1` 로 보낸 요청을 연결된 서버의 추론 서버(포트 11434)로 그대로 넘깁니다.
+   - 코드 편집기나 파이썬 코드의 Base URL 만 이 주소로 바꾸면 됩니다.
+   - 원격 추론 서버가 꺼져 있으면 502 와 까닭을 돌려줍니다.
+
+3. **남은 VRAM 기준 모델 목록**
+   - 읽어 온 남은 VRAM 을 내장된 공개 AI 모델 8개의 최소 요구 용량과 비교해, 지금 돌릴 수 있는 모델을 구분해 보여 줍니다.
+
+4. **호스트 키 확인**
+   - 처음 접속한 서버의 호스트 키 지문을 `known_hosts.json` 에 적어 둡니다. 다음 접속 때 키가 달라져 있으면 접속을 막습니다.
+   - 서버를 다시 설치해 키가 바뀌었다면 `known_hosts.json` 에서 그 서버 줄을 지우고 다시 접속합니다.
+
+## 미리 알려 드립니다
+
+- 설치 파일이나 공개 웹 서비스는 없습니다. 코드를 받아 내 PC에서 실행합니다.
+- 원격 서버에 SSH 접속이 열려 있어야 하고, 요청을 넘기려면 그 서버에 추론 서버가 떠 있어야 합니다.
+- 대시보드에 표시되는 「SSH 왕복」 시간은 SSH 로 GPU 상태를 읽고 오는 데 걸린 시간입니다. 네트워크 지연만 따로 잰 값이 아닙니다.
+- SSH 비밀번호는 저장하지 않습니다. 대시보드는 내 PC(`localhost`)에서만 여세요.
+- 아직 안 되는 것: 추천 모델 바로 배포, 클라이언트·호스트 모드 전환(화면에 단추만 있습니다), SSH 키 파일 로그인.
 
 ---
 
-## 🚀 Quick Start
+## 기술 구성
 
-### 1. Repository Clone & Install
+- **Backend**: Node.js, Express, `http-proxy`, `ssh2`, `ws`
+- **Frontend**: Vanilla JavaScript, HTML, CSS
+- **자원 조회**: `nvidia-smi`
+
+---
+
+## 실행
+
+### 1. 받기와 설치
 ```bash
 git clone https://github.com/gijotour/GIJO_BridgeAI.git
 cd GIJO_BridgeAI
 npm install
 ```
 
-### 2. Run Application
+### 2. 실행
 ```bash
 node server.js
 ```
 
-### 3. Access Dashboard
-웹 브라우저에서 `http://localhost:3000` 접속 후 대시보드를 사용할 수 있습니다.
+### 3. 대시보드 열기
 
-- **컨트룰 대시보드**: `http://localhost:3000`
-- **로컬 API 프록시 Base URL**: `http://localhost:3000/v1` (또는 `/ollama`)
+- **대시보드**: `http://localhost:3000`
+- **로컬 프록시 Base URL**: `http://localhost:3000/v1`
 
 ---
 
-## 📄 License
+## License
 ISC License © 2026 GIJO_BridgeAI Corp.

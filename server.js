@@ -2,9 +2,10 @@ const express = require('express');
 const http = require('http');
 const httpProxy = require('http-proxy');
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const cors = require('cors');
 const { Client: SSHClient } = require('ssh2');
-const fetch = require('node-fetch');
 const WebSocket = require('ws');
 
 const app = express();
@@ -34,150 +35,241 @@ app.use('/v1', (req, res) => {
     req.url = req.originalUrl;
     proxy.web(req, res, { target: `http://${remoteAuthSession.hostIp}:11434` });
   } else {
-    res.status(503).json({ error: 'GIJO_BridgeAI 오프라인 (진짜 SSH ID/PW 로그인 필요)' });
+    res.status(503).json({ error: 'GIJO_BridgeAI 오프라인 (SSH 로그인 필요)' });
   }
 });
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 실제 원격 SSH 연결 세션 객체
+// ── 설정 ──────────────────────────────────────────────────────────────
+/** 연결된 동안 원격 자원을 다시 읽는 간격. */
+const REFRESH_MS = 5000;
+/** 처음 접속한 서버의 호스트 키 지문을 적어 두는 파일. 저장소에는 올리지 않는다(.gitignore). */
+const KNOWN_HOSTS_FILE = process.env.BRIDGEAI_KNOWN_HOSTS || path.join(__dirname, 'known_hosts.json');
+
+/** nvidia-smi 가 없으면 이 표시를 내보낸다. 그럴 때 용량을 지어내지 않는다. */
+const NO_GPU_QUERY = '__BRIDGEAI_NO_GPU_QUERY__';
+const GPU_COMMAND =
+  'nvidia-smi --query-gpu=name,memory.total,memory.used,temperature.gpu --format=csv,noheader,nounits' +
+  ` || echo ${NO_GPU_QUERY}`;
+
+// ── 상태 ──────────────────────────────────────────────────────────────
+const emptyGpuInfo = (label, architecture) => ({
+  gpuName: label,
+  totalGB: 0,
+  usedGB: 0,
+  freeGB: 0,
+  architecture,
+  temperature: null,
+  isRealAuthDevice: false,
+  isMeasured: false
+});
+
 let activeSshClient = null;
+let refreshTimer = null;
 let remoteAuthSession = {
   isAuthSuccess: false,
-  hostIp: '10.8.0.12',
+  hostIp: '',
   port: 22,
   username: '',
   connectedAt: null,
-  gpuInfo: {
-    gpuName: '10.8.0.12 원격 GPU (실제 SSH 로그인 필요)',
-    totalGB: 0,
-    usedGB: 0,
-    freeGB: 0,
-    architecture: 'SSH 미연결 상태',
-    temperature: 0,
-    isRealAuthDevice: false
-  }
+  lastMeasuredAt: null,
+  rttMs: null,
+  gpuInfo: emptyGpuInfo('원격 GPU (SSH 로그인 필요)', 'SSH 미연결 상태')
 };
 
-// 진짜 SSH 커넥션을 맺고 원격 nvidia-smi / sysctl / powershell 명령어를 실행하는 핵심 함수
-function connectAndFetchRealSshGpuTelemetry(hostIp, port, username, password) {
+// ── 호스트 키 확인 (처음 본 키를 적어 두고, 다음부터 달라지면 접속을 막는다) ──
+function readKnownHosts() {
+  try {
+    return JSON.parse(fs.readFileSync(KNOWN_HOSTS_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function fingerprintOf(keyBuffer) {
+  return 'SHA256:' + crypto.createHash('sha256').update(keyBuffer).digest('base64').replace(/=+$/, '');
+}
+
+/**
+ * @returns {{ ok: boolean, fingerprint: string, firstSeen: boolean }}
+ */
+function checkHostKey(hostIp, port, keyBuffer) {
+  const id = `${hostIp}:${port}`;
+  const fingerprint = fingerprintOf(keyBuffer);
+  const known = readKnownHosts();
+  if (!known[id]) {
+    known[id] = fingerprint;
+    fs.writeFileSync(KNOWN_HOSTS_FILE, JSON.stringify(known, null, 2));
+    return { ok: true, fingerprint, firstSeen: true };
+  }
+  return { ok: known[id] === fingerprint, fingerprint, firstSeen: false };
+}
+
+// ── 원격 자원 읽기 ────────────────────────────────────────────────────
+/** nvidia-smi 한 줄(이름, 전체MB, 사용MB, 온도)을 읽는다. 읽지 못하면 null. */
+function parseNvidiaSmi(output) {
+  const line = output.trim().split('\n')[0] || '';
+  const parts = line.split(',').map((p) => p.trim());
+  if (parts.length < 3) return null;
+  const totalMb = parseFloat(parts[1]);
+  const usedMb = parseFloat(parts[2]);
+  if (!Number.isFinite(totalMb) || !Number.isFinite(usedMb) || totalMb <= 0) return null;
+  const temp = parseInt(parts[3], 10);
+  const totalGB = +(totalMb / 1024).toFixed(1);
+  const usedGB = +(usedMb / 1024).toFixed(1);
+  return {
+    gpuName: parts[0],
+    totalGB,
+    usedGB,
+    freeGB: +(totalGB - usedGB).toFixed(1),
+    architecture: 'nvidia-smi 로 읽은 값',
+    temperature: Number.isFinite(temp) ? temp : null,
+    isRealAuthDevice: true,
+    isMeasured: true
+  };
+}
+
+/** 열려 있는 SSH 연결로 GPU 상태를 한 번 읽는다. 왕복에 걸린 시간도 함께 돌려준다. */
+function queryGpu(ssh) {
   return new Promise((resolve, reject) => {
-    const ssh = new SSHClient();
-
-    ssh.on('ready', () => {
-      console.log(`[REAL SSH] Connected successfully to ${username}@${hostIp}:${port}`);
-      
-      // Linux/Windows/Mac 호환 원격 GPU 실측 명령어 시도 (1차: nvidia-smi, 2차: Windows powershell, 3차: Mac sysctl)
-      const command = 'nvidia-smi --query-gpu=name,memory.total,memory.used,temperature.gpu --format=csv,noheader,nounits || powershell -Command "Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM" || sysctl hw.memsize hw.model';
-
-      ssh.exec(command, (err, stream) => {
-        if (err) {
-          ssh.end();
-          return reject(new Error(`SSH 명령 실행 실패: ${err.message}`));
-        }
-
-        let outputData = '';
-        let errorData = '';
-
-        stream.on('data', (data) => { outputData += data.toString(); });
-        stream.stderr.on('data', (data) => { errorData += data.toString(); });
-
-        stream.on('close', (code) => {
-          ssh.end();
-
-          if (!outputData.trim()) {
-            return reject(new Error(`SSH 연결은 성공했으나 GPU 정보를 읽을 수 없습니다: ${errorData}`));
-          }
-
-          try {
-            // nvidia-smi 결과 파싱 시도 (예: NVIDIA GeForce RTX 3090, 24576, 4096, 45)
-            const lines = outputData.trim().split('\n')[0];
-            if (lines.includes(',')) {
-              const parts = lines.split(',');
-              const gpuName = parts[0].trim();
-              const totalMb = parseFloat(parts[1]);
-              const usedMb = parseFloat(parts[2]);
-              const temp = parseInt(parts[3], 10) || 45;
-
-              const totalGB = +(totalMb / 1024).toFixed(1);
-              const usedGB = +(usedMb / 1024).toFixed(1);
-              const freeGB = +(totalGB - usedGB).toFixed(1);
-
-              remoteAuthSession.isAuthSuccess = true;
-              remoteAuthSession.hostIp = hostIp;
-              remoteAuthSession.username = username;
-              remoteAuthSession.gpuInfo = {
-                gpuName: gpuName,
-                totalGB,
-                usedGB,
-                freeGB,
-                architecture: 'REAL SSH Device (nvidia-smi 실측 수집됨)',
-                temperature: temp,
-                isRealAuthDevice: true
-              };
-
-              return resolve({
-                success: true,
-                message: `[진짜 SSH 실측 성공!] ${hostIp} (${gpuName}) 실시간 VRAM ${freeGB}GB 수집 완료`,
-                session: remoteAuthSession
-              });
-            }
-
-            // 일반 Windows/Mac 텍스트 파싱
-            remoteAuthSession.isAuthSuccess = true;
-            remoteAuthSession.hostIp = hostIp;
-            remoteAuthSession.username = username;
-            remoteAuthSession.gpuInfo = {
-              gpuName: outputData.trim().split('\n')[0],
-              totalGB: 16.0,
-              usedGB: 2.1,
-              freeGB: 13.9,
-              architecture: 'REAL SSH Device (원격 실측 수집)',
-              temperature: 42,
-              isRealAuthDevice: true
-            };
-
-            resolve({
-              success: true,
-              message: `[진짜 SSH 실측 성공!] ${hostIp} 서버 자원 수집 완료`,
-              session: remoteAuthSession
-            });
-          } catch (parseErr) {
-            reject(new Error(`SSH 데이터 파싱 에러: ${parseErr.message}`));
-          }
-        });
+    const startedAt = process.hrtime.bigint();
+    ssh.exec(GPU_COMMAND, (err, stream) => {
+      if (err) return reject(new Error(`SSH 명령 실행 실패: ${err.message}`));
+      let out = '';
+      stream.on('data', (d) => { out += d.toString(); });
+      stream.stderr.on('data', () => {});
+      stream.on('close', () => {
+        const rttMs = +(Number(process.hrtime.bigint() - startedAt) / 1e6).toFixed(1);
+        const measured = out.includes(NO_GPU_QUERY) ? null : parseNvidiaSmi(out);
+        const gpuInfo = measured || {
+          ...emptyGpuInfo('GPU 정보를 읽지 못했습니다', 'GPU 상태 조회 명령(nvidia-smi)이 없어 용량·온도 확인 불가'),
+          isRealAuthDevice: true
+        };
+        resolve({ gpuInfo, rttMs });
       });
-    });
-
-    ssh.on('error', (err) => {
-      console.error('[REAL SSH Error]:', err.message);
-      reject(new Error(`SSH 접속 실패 (${hostIp}:${port}): ${err.message}`));
-    });
-
-    // 진짜 22번 포트 SSH 접속 시도 (타임아웃 5초)
-    ssh.connect({
-      host: hostIp,
-      port: parseInt(port, 10) || 22,
-      username: username,
-      password: password,
-      readyTimeout: 5000
     });
   });
 }
 
-// 라이브 소켓
+function stopSession(label, architecture) {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = null;
+  const ssh = activeSshClient;
+  activeSshClient = null;
+  if (ssh) {
+    try { ssh.end(); } catch { /* 이미 닫힘 */ }
+  }
+  remoteAuthSession.isAuthSuccess = false;
+  remoteAuthSession.connectedAt = null;
+  remoteAuthSession.lastMeasuredAt = null;
+  remoteAuthSession.rttMs = null;
+  remoteAuthSession.gpuInfo = emptyGpuInfo(label, architecture);
+}
+
+function applyMeasurement({ gpuInfo, rttMs }) {
+  remoteAuthSession.gpuInfo = gpuInfo;
+  remoteAuthSession.rttMs = rttMs;
+  remoteAuthSession.lastMeasuredAt = Date.now();
+}
+
+/** SSH 로 접속해 GPU 상태를 읽고, 연결을 열어 둔 채 REFRESH_MS 마다 다시 읽는다. */
+function connectSsh(hostIp, port, username, password) {
+  return new Promise((resolve, reject) => {
+    const portNum = parseInt(port, 10) || 22;
+    const ssh = new SSHClient();
+    let hostKey = null;
+    let settled = false;
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      try { ssh.end(); } catch { /* 이미 닫힘 */ }
+      reject(new Error(message));
+    };
+
+    ssh.on('ready', async () => {
+      try {
+        const first = await queryGpu(ssh);
+        // 새 연결이 확인된 뒤에 앞선 연결을 닫는다.
+        stopSession('원격 GPU (미연결)', 'SSH 접속 해제됨');
+        activeSshClient = ssh;
+        remoteAuthSession.isAuthSuccess = true;
+        remoteAuthSession.hostIp = hostIp;
+        remoteAuthSession.port = portNum;
+        remoteAuthSession.username = username;
+        remoteAuthSession.connectedAt = Date.now();
+        applyMeasurement(first);
+
+        let busy = false;
+        refreshTimer = setInterval(async () => {
+          if (busy || activeSshClient !== ssh) return;
+          busy = true;
+          try {
+            applyMeasurement(await queryGpu(ssh));
+          } catch (e) {
+            console.error('[SSH] 다시 읽기 실패:', e.message);
+          } finally {
+            busy = false;
+          }
+        }, REFRESH_MS);
+
+        settled = true;
+        const g = first.gpuInfo;
+        resolve({
+          success: true,
+          message: g.isMeasured
+            ? `SSH 연결 성공: ${hostIp} (${g.gpuName}) 남은 VRAM ${g.freeGB}GB`
+            : `SSH 연결은 됐지만 GPU 상태 조회 명령이 없어 용량을 읽지 못했습니다 (${hostIp})`,
+          hostKey,
+          session: remoteAuthSession
+        });
+      } catch (e) {
+        fail(e.message);
+      }
+    });
+
+    ssh.on('error', (err) => {
+      console.error('[SSH Error]:', err.message);
+      if (hostKey && !hostKey.ok) {
+        return fail(
+          `서버의 호스트 키가 처음 접속했을 때와 다릅니다 (${hostIp}:${portNum}). ` +
+          '서버를 다시 설치했다면 known_hosts.json 에서 이 서버 줄을 지우고 다시 접속하세요. ' +
+          '그런 일이 없었다면 접속하지 마세요.'
+        );
+      }
+      fail(`SSH 접속 실패 (${hostIp}:${portNum}): ${err.message}`);
+    });
+
+    ssh.on('close', () => {
+      if (activeSshClient === ssh) {
+        stopSession('원격 GPU (연결 끊김)', '원격 서버와의 SSH 연결이 끊어졌습니다');
+      }
+    });
+
+    ssh.connect({
+      host: hostIp,
+      port: portNum,
+      username,
+      password,
+      readyTimeout: 5000,
+      keepaliveInterval: 10000,
+      hostVerifier: (keyBuffer) => {
+        hostKey = checkHostKey(hostIp, portNum, keyBuffer);
+        return hostKey.ok;
+      }
+    });
+  });
+}
+
+// ── 화면으로 상태 밀어 주기 ────────────────────────────────────────────
 wss.on('connection', (ws) => {
-  const p2pInterval = setInterval(() => {
+  const timer = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'telemetry_push',
-        webrtc: {
-          rttMs: remoteAuthSession.isAuthSuccess ? +(6.5 + Math.random() * 1.5).toFixed(1) : 0,
-          packetLossPct: 0.0,
-          jitterMs: 0.3,
-          handshakeAgeSec: 1,
-        },
+        // SSH 로 GPU 상태를 읽고 오는 데 걸린 시간(실제 측정값). 미연결이면 null.
+        sshRoundTripMs: remoteAuthSession.rttMs,
         hostVram: remoteAuthSession.gpuInfo,
         authSession: remoteAuthSession,
         timestamp: Date.now()
@@ -185,10 +277,10 @@ wss.on('connection', (ws) => {
     }
   }, 1000);
 
-  ws.on('close', () => clearInterval(p2pInterval));
+  ws.on('close', () => clearInterval(timer));
 });
 
-// HuggingFace 실측 모델 추천
+// 공개 AI 모델과 최소 VRAM (내장 목록)
 const hfModelDatabase = [
   { id: 'deepseek-r1-70b', name: 'DeepSeek-R1-Distill-70B (Q4_K_M)', repo: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-70B', reqVramGB: 43.0, category: 'LLM (추론/코딩)', tags: ['인기', '70B', 'High-Reasoning'] },
   { id: 'qwen2.5-coder-32b', name: 'Qwen2.5-Coder-32B-Instruct (Q8_0)', repo: 'Qwen/Qwen2.5-Coder-32B-Instruct-GGUF', reqVramGB: 34.0, category: 'LLM (코딩 특화)', tags: ['추천', '32B', 'Code'] },
@@ -200,25 +292,26 @@ const hfModelDatabase = [
   { id: 'deepseek-r1-8b', name: 'DeepSeek-R1-Distill-Qwen-8B', repo: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-8B', reqVramGB: 6.0, category: 'LLM (초경량)', tags: ['Lightweight'] }
 ];
 
-// 진짜 원격 SSH 서버 ID / PW 로그인 시도 API
-app.post('/api/bridge/auth-login', async (req, res) => {
-  const { hostIp, port, username, password } = req.body;
-  
+async function handleLogin(req, res) {
+  const { hostIp, port, username, password } = req.body || {};
+
   if (!hostIp || !username || !password) {
-    return res.status(400).json({ success: false, error: '원격 서버 IP, 계정 ID, 비밀번호를 모두 입력해주세요.' });
+    return res.status(400).json({ success: false, error: '원격 서버 주소, 계정 ID, 비밀번호를 모두 입력해주세요.' });
   }
 
   try {
-    const result = await connectAndFetchRealSshGpuTelemetry(hostIp, port || 22, username, password);
-    res.json(result);
+    res.json(await connectSsh(hostIp, port || 22, username, password));
   } catch (err) {
     res.status(401).json({
       success: false,
-      error: `[진짜 SSH 접속 실패] ${err.message}`,
-      suggestion: '10.8.0.12 서버에 SSH 서비스(OpenSSH/Port 22)가 구동 중이고 ID/PW가 맞는지 확인하세요.'
+      error: `[SSH 접속 실패] ${err.message}`,
+      suggestion: '원격 서버에 SSH 서비스가 켜져 있고 주소·포트·계정이 맞는지 확인하세요.'
     });
   }
-});
+}
+
+app.post('/api/bridge/auth-login', handleLogin);
+app.post('/api/bridge/connect', handleLogin);
 
 app.get('/api/host/telemetry', (req, res) => {
   res.json(remoteAuthSession.gpuInfo);
@@ -253,34 +346,13 @@ app.get('/api/bridge/status', (req, res) => {
     hostIp: remoteAuthSession.hostIp,
     authSession: remoteAuthSession,
     hostVram: remoteAuthSession.gpuInfo,
-    latency: 7
+    // SSH 로 GPU 상태를 읽고 오는 데 걸린 시간(ms, 실제 측정값). 미연결이면 null.
+    latency: remoteAuthSession.rttMs
   });
 });
 
-app.post('/api/bridge/connect', async (req, res) => {
-  const { hostIp, port, username, password } = req.body;
-  try {
-    const result = await connectAndFetchRealSshGpuTelemetry(hostIp, port || 22, username, password);
-    res.json(result);
-  } catch (err) {
-    res.status(401).json({
-      success: false,
-      error: `[진짜 SSH 접속 실패] ${err.message}`
-    });
-  }
-});
-
 app.post('/api/bridge/disconnect', (req, res) => {
-  remoteAuthSession.isAuthSuccess = false;
-  remoteAuthSession.gpuInfo = {
-    gpuName: '10.8.0.12 원격 GPU (미연결)',
-    totalGB: 0,
-    usedGB: 0,
-    freeGB: 0,
-    architecture: 'SSH 접속 해제됨',
-    temperature: 0,
-    isRealAuthDevice: false
-  };
+  stopSession('원격 GPU (미연결)', 'SSH 접속 해제됨');
   res.json({ success: true, message: 'SSH 세션 연결 해제 완료' });
 });
 
@@ -288,10 +360,10 @@ const PORT = 3000;
 server.listen(PORT, () => {
   console.log(`
   ======================================================
-   🚀 GIJO_BridgeAI (진짜 SSH2 계정 원격 GPU 실측 시스템)
+   GIJO_BridgeAI (SSH 원격 GPU 자원 조회 · 로컬 프록시)
    ------------------------------------------------------
    - 대시보드 : http://localhost:${PORT}
-   - 원격 통신 : ssh2 포트 22 실시간 커맨드 실행
+   - 프록시   : http://localhost:${PORT}/v1
   ======================================================
   `);
 });

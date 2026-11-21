@@ -31,16 +31,21 @@ function initWebRtcP2pSocket() {
 function updateGpuTelemetryUI(vram) {
   document.getElementById('gpuName').innerText = vram.gpuName;
   document.getElementById('gpuArch').innerText = `구조: ${vram.architecture}`;
-  document.getElementById('valTemp').innerText = `${vram.temperature} °C`;
-  
-  const freeVram = vram.freeGB || (vram.totalGB - vram.usedGB).toFixed(1);
-  document.getElementById('valFreeVram').innerText = `${freeVram} GB`;
+  // 읽지 못한 값은 숫자를 지어내지 않고 '-' 로 둔다.
+  const hasTemp = vram.temperature !== null && vram.temperature !== undefined;
+  document.getElementById('valTemp').innerText = hasTemp ? `${vram.temperature} °C` : '-';
+
+  const known = vram.totalGB > 0;
+  const freeVram = known ? (vram.freeGB || (vram.totalGB - vram.usedGB).toFixed(1)) : '-';
+  document.getElementById('valFreeVram').innerText = known ? `${freeVram} GB` : '-';
 
   const used = vram.usedGB;
   const total = vram.totalGB;
   const pct = total > 0 ? ((used / total) * 100).toFixed(1) : 0;
 
-  document.getElementById('vramText').innerText = `${used} GB / ${total} GB (실제 남은 가용: ${freeVram} GB)`;
+  document.getElementById('vramText').innerText = known
+    ? `${used} GB / ${total} GB (남은 용량: ${freeVram} GB)`
+    : '용량 확인 불가';
   document.getElementById('vramProgress').style.width = `${pct}%`;
 }
 
@@ -67,7 +72,7 @@ function updateUI(data) {
   if (data.status === 'connected') {
     statusDot.className = 'status-indicatorConnected';
     statusTitle.innerText = `원격 GPU 서버 (${data.hostIp}) SSH2 연결 성공`;
-    statusSub.innerText = `SSH 계정(${data.authSession.username}) 22번 포트 접속 완료 - 실제 자원이 읽혀졌습니다.`;
+    statusSub.innerText = `SSH 계정(${data.authSession.username}) 접속 완료 · 5초마다 다시 읽습니다${data.latency != null ? ` · SSH 왕복 ${data.latency} ms` : ''}`;
     btnConnect.innerText = '🔌 SSH2 접속 끊기';
     btnConnect.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
     userAuthTag.innerText = `SSH2: ${data.authSession.username} (연결됨)`;
@@ -81,7 +86,7 @@ function updateUI(data) {
   } else {
     statusDot.className = 'status-indicatorDisconnected';
     statusTitle.innerText = '진짜 SSH 미연결';
-    statusSub.innerText = '원격 10.8.0.12 PC의 진짜 SSH 계정을 입력해 접속하세요';
+    statusSub.innerText = '원격 서버 주소와 SSH 계정을 입력해 접속하세요';
     btnConnect.innerText = '🔑 진짜 SSH 접속 및 실시간 GPU 자원 읽어오기';
     btnConnect.style.background = 'linear-gradient(135deg, var(--primary), var(--accent-cyan))';
     userAuthTag.innerText = 'SSH2 세션 미연결';
@@ -158,14 +163,14 @@ async function toggleConnect() {
   const username = document.getElementById('inputUsername').value;
   const password = document.getElementById('inputPassword').value;
 
-  if (!username || !password) {
-    alert('원격 PC의 실제 SSH 계정 ID와 비밀번호를 입력해주세요!');
-    return;
-  }
-
   if (currentStatus === 'connected') {
     await fetch('/api/bridge/disconnect', { method: 'POST' });
   } else {
+    if (!hostIp || !username || !password) {
+      alert('원격 서버 주소, SSH 계정 ID, 비밀번호를 입력해주세요!');
+      return;
+    }
+
     updateUI({ status: 'connecting', hostIp, authSession: { username }, hostVram: {} });
     
     try {
