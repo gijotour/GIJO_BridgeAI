@@ -13,6 +13,31 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/webrtc-p2p' });
 
 app.use(cors());
+
+// 프록시는 본문 파서보다 먼저 건다. express.json() 이 본문을 먼저 읽어 버리면
+// 원격 서버로 넘길 본문이 남지 않아 POST 요청이 응답 없이 멈춘다.
+const proxy = httpProxy.createProxyServer({ changeOrigin: true });
+
+// 원격 추론 서버가 꺼져 있을 때 프로세스가 죽지 않고 502 로 알린다.
+proxy.on('error', (err, req, res) => {
+  if (res && !res.headersSent && typeof res.writeHead === 'function') {
+    res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+  }
+  if (res && typeof res.end === 'function') {
+    res.end(JSON.stringify({ error: `원격 추론 서버에 연결하지 못했습니다: ${err.message}` }));
+  }
+});
+
+app.use('/v1', (req, res) => {
+  if (remoteAuthSession.isAuthSuccess) {
+    // app.use('/v1') 는 주소에서 /v1 을 떼어 낸다. 원격 서버는 /v1/... 을 기다리므로 원래 주소로 되돌린다.
+    req.url = req.originalUrl;
+    proxy.web(req, res, { target: `http://${remoteAuthSession.hostIp}:11434` });
+  } else {
+    res.status(503).json({ error: 'GIJO_BridgeAI 오프라인 (진짜 SSH ID/PW 로그인 필요)' });
+  }
+});
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -175,8 +200,6 @@ const hfModelDatabase = [
   { id: 'deepseek-r1-8b', name: 'DeepSeek-R1-Distill-Qwen-8B', repo: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-8B', reqVramGB: 6.0, category: 'LLM (초경량)', tags: ['Lightweight'] }
 ];
 
-const proxy = httpProxy.createProxyServer({ changeOrigin: true });
-
 // 진짜 원격 SSH 서버 ID / PW 로그인 시도 API
 app.post('/api/bridge/auth-login', async (req, res) => {
   const { hostIp, port, username, password } = req.body;
@@ -222,14 +245,6 @@ app.get('/api/bridge/huggingface-recommendations', (req, res) => {
     gpuName: remoteAuthSession.gpuInfo.gpuName,
     recommendations: recommendedModels
   });
-});
-
-app.use('/v1', (req, res) => {
-  if (remoteAuthSession.isAuthSuccess) {
-    proxy.web(req, res, { target: `http://${remoteAuthSession.hostIp}:11434` });
-  } else {
-    res.status(503).json({ error: 'GIJO_BridgeAI 오프라인 (진짜 SSH ID/PW 로그인 필요)' });
-  }
 });
 
 app.get('/api/bridge/status', (req, res) => {
