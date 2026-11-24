@@ -3,164 +3,171 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GIJO_BridgeAI - 진짜 SSH2 원격 서버 자원 수집 시스템</title>
+  <title>GIJO_BridgeAI — 원격 GPU 연결</title>
+  <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="style.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+  <!-- 바깥 글꼴을 불러오지 않는다. 이 화면은 내 PC 안에서만 돌고, 바깥으로 요청을 보내지 않게 둔다. -->
 </head>
 <body>
   <div class="app-container">
-    <!-- Header / Navbar -->
     <header class="navbar">
       <div class="logo">
         <span class="logo-icon">⚡</span>
         <span class="logo-text">GIJO_<span class="highlight">BridgeAI</span></span>
-        <span class="badge-tag">진짜 SSH2 포트 22 실시간 수집</span>
-      </div>
-      
-      <div class="mode-toggle-group">
-        <button id="btnModeClient" class="toggle-btn active" onclick="switchMode('client')">
-          💻 외출용 노트북 (클라이언트)
-        </button>
-        <button id="btnModeHost" class="toggle-btn" onclick="switchMode('host')">
-          🖥️ 집 AI 서버 (GPU 호스트)
-        </button>
+        <span class="badge-tag">SSH 터널 · 내 PC 전용</span>
       </div>
 
       <div class="user-profile">
         <span class="user-status-dot connected"></span>
-        <span class="user-name" id="userAuthTag">SSH2 세션 미연결</span>
+        <span class="user-name" id="userAuthTag">SSH 미연결</span>
       </div>
     </header>
 
-    <!-- Main Content Area -->
     <main class="content-grid">
-      
-      <!-- Left Panel: Connection Controls -->
+
+      <!-- 왼쪽: 접속 -->
       <section class="card control-card">
         <div class="card-header">
-          <h2>진짜 원격 GPU 서버 SSH 접속 (Port 22)</h2>
-          <span class="tooltip-icon" title="원격 서버의 SSH 계정 ID와 비밀번호를 입력하면 SSH로 접속해 nvidia-smi 명령으로 자원을 읽어옵니다. 처음 접속한 서버의 호스트 키를 기억해 두고, 다음에 달라지면 접속을 막습니다.">ⓘ</span>
+          <h2>원격 GPU 서버 SSH 접속</h2>
+          <span class="tooltip-icon" title="SSH 로 접속해 nvidia-smi 로 GPU 상태를 읽습니다. 처음 접속한 서버의 호스트 키를 기억해 두고, 다음에 달라지면 접속을 막습니다.">ⓘ</span>
         </div>
 
         <div class="connection-status-box" id="statusBox">
           <div class="status-indicatorDisconnected" id="statusDot"></div>
           <div class="status-info">
-            <span class="status-title" id="statusTitle">진짜 SSH 미연결</span>
+            <span class="status-title" id="statusTitle">SSH 미연결</span>
             <span class="status-sub" id="statusSub">원격 서버 주소와 SSH 계정을 입력해 접속하세요</span>
           </div>
         </div>
 
-        <!-- ID / PW Real SSH Form -->
-        <div class="auth-form-card">
+        <form class="auth-form-card" id="authForm" onsubmit="event.preventDefault(); toggleConnect();">
           <div class="form-group">
-            <label for="inputHostIp">원격 GPU 서버 IP 및 SSH 포트</label>
+            <label for="inputHostIp">원격 서버 주소 · SSH 포트</label>
             <div class="input-with-button">
-              <input type="text" id="inputHostIp" value="" placeholder="원격 서버 주소">
-              <input type="text" id="inputPort" value="22" placeholder="22" style="width: 70px;">
+              <input type="text" id="inputHostIp" value="" placeholder="예: 192.168.0.20 또는 spark-xxxx.local" autocomplete="off">
+              <input type="text" id="inputPort" value="22" placeholder="22" style="width: 70px;" inputmode="numeric" aria-label="SSH 포트">
             </div>
           </div>
 
           <div class="form-group">
-            <label for="inputUsername">실제 원격 계정 ID (Username)</label>
-            <input type="text" id="inputUsername" placeholder="예: root 또는 사용자명">
+            <label for="inputUsername">계정 ID</label>
+            <input type="text" id="inputUsername" placeholder="예: 사용자명" autocomplete="username">
           </div>
 
           <div class="form-group">
-            <label for="inputPassword">실제 원격 계정 비밀번호 (Password)</label>
-            <input type="password" id="inputPassword" placeholder="비밀번호 입력">
+            <label for="inputPassword">비밀번호 <span class="label-note">(SSH 키를 쓰면 비워 둡니다)</span></label>
+            <input type="password" id="inputPassword" placeholder="비밀번호" autocomplete="current-password">
           </div>
-        </div>
 
-        <div class="action-buttons">
-          <button id="btnConnect" class="btn-primary" onclick="toggleConnect()">
-            🔑 진짜 SSH 접속 및 실시간 GPU 자원 읽어오기
-          </button>
-        </div>
+          <details class="form-more" id="formMore">
+            <summary>SSH 키 · 추론 서버 포트</summary>
+            <div class="form-group">
+              <label for="inputKeyPath">SSH 개인 키 파일 경로</label>
+              <input type="text" id="inputKeyPath" placeholder="예: C:\Users\나\.ssh\id_ed25519 또는 ~/.ssh/id_ed25519" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="inputPassphrase">키 암호 <span class="label-note">(키에 암호가 있을 때만)</span></label>
+              <input type="password" id="inputPassphrase" placeholder="키 암호" autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="inputInferencePort">원격 추론 서버 포트</label>
+              <input type="text" id="inputInferencePort" value="11434" inputmode="numeric">
+              <p class="field-hint">Ollama 는 11434, vLLM 은 보통 8000, llama.cpp 서버는 8080 입니다. 원격 서버에서 127.0.0.1 에만 떠 있어도 됩니다.</p>
+            </div>
+          </details>
+
+          <div class="action-buttons">
+            <button id="btnConnect" class="btn-primary" type="submit">🔑 SSH 접속하고 GPU 상태 읽기</button>
+          </div>
+        </form>
 
         <div class="local-proxy-banner">
-          <div class="banner-title">💻 내 노트북 로컬 API 프록시 (Base URL)</div>
+          <div class="banner-title">💻 내 PC 로컬 프록시 (Base URL)</div>
           <div class="code-box">
-            <code>http://localhost:3000/v1</code>
-            <button class="btn-copy" onclick="copyProxyUrl()">복사</button>
+            <code id="proxyUrl">http://localhost:3000/v1</code>
+            <button class="btn-copy" type="button" onclick="copyProxyUrl()">복사</button>
           </div>
-          <p class="banner-desc">VS Code Continue, Cursor, Python 코드의 Base URL에 이 주소를 입력하시면, 노트북 VRAM 소비 0MB로 SSH 접속된 원격 서버에서 연산이 실행됩니다.</p>
+          <p class="banner-desc">편집기(Continue · Cursor 등)나 파이썬 코드의 Base URL 을 이 주소로 바꾸면, AI 연산이 SSH 터널을 거쳐 원격 서버에서 돕니다. 이 주소는 이 PC 에서만 열립니다.</p>
         </div>
       </section>
 
-      <!-- Right Panel: Monitoring & Real Telemetry -->
+      <!-- 오른쪽: 상태 -->
       <section class="card telemetry-card">
         <div class="card-header">
-          <h2>SSH2 커맨드 실제 읽어온 자원 (Real Telemetry)</h2>
-          <span class="live-tag">SSH2 REAL LIVE</span>
+          <h2>원격 서버에서 읽어 온 자원</h2>
+          <span class="live-tag">5초마다 갱신</span>
         </div>
 
         <div class="gpu-spec-header">
           <div class="gpu-icon">🧠</div>
           <div class="gpu-details">
-            <div class="gpu-name" id="gpuName">SSH 접속 후 진짜 하드웨어 읽어오는 중...</div>
+            <div class="gpu-name" id="gpuName">SSH 접속 후 표시됩니다</div>
             <div class="gpu-location" id="gpuArch">구조: SSH 접속 필요</div>
           </div>
         </div>
 
-        <!-- VRAM Usage Progress Bar -->
         <div class="vram-meter-container">
           <div class="meter-label">
-            <span>원격 서버 실측 VRAM 사용량</span>
-            <span id="vramText" class="vram-val">0 GB / 0 GB</span>
+            <span id="memLabel">GPU 메모리 사용량</span>
+            <span id="vramText" class="vram-val">-</span>
           </div>
           <div class="progress-bar">
             <div class="progress-fill" id="vramProgress" style="width: 0%;"></div>
           </div>
         </div>
 
-        <!-- Telemetry Stats Grid -->
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon">🔑</div>
             <div class="stat-value" id="valAuthStatus">미연결</div>
-            <div class="stat-label">SSH2 접속 상태</div>
+            <div class="stat-label">SSH 상태</div>
           </div>
-
           <div class="stat-card">
             <div class="stat-icon">💾</div>
-            <div class="stat-value" id="valFreeVram">0.0 GB</div>
-            <div class="stat-label">실제 남아있는 VRAM</div>
+            <div class="stat-value" id="valFreeVram">-</div>
+            <div class="stat-label" id="freeLabel">남은 메모리</div>
           </div>
-
           <div class="stat-card">
             <div class="stat-icon">🌡️</div>
             <div class="stat-value" id="valTemp">-</div>
-            <div class="stat-label">실제 GPU 온도</div>
+            <div class="stat-label">GPU 온도</div>
           </div>
-
           <div class="stat-card">
-            <div class="stat-icon">💻</div>
-            <div class="stat-value">노트북 VRAM 0 MB</div>
-            <div class="stat-label">내 노트북 부하 Zero</div>
+            <div class="stat-icon">⏱️</div>
+            <div class="stat-value" id="valRtt">-</div>
+            <div class="stat-label">SSH 왕복(상태 읽기)</div>
           </div>
         </div>
 
-        <!-- HuggingFace Recommendation Section -->
+        <!-- 서버에 이미 있는 모델 -->
         <div class="hf-recommendation-section">
           <div class="hf-header">
-            <span class="hf-title">🤗 HuggingFace 남은 VRAM 기반 스마트 AI 모델 추천</span>
-            <button class="btn-sm" onclick="loadHfRecommendations()">↻ 새로고침</button>
+            <span class="hf-title">🗂️ 원격 서버에 있는 모델</span>
+            <button class="btn-sm" type="button" onclick="loadRemoteModels()">↻ 새로고침</button>
           </div>
-          <p class="hf-subtext">SSH2로 읽어온 <strong>원격 서버의 실시간 남은 가용 VRAM</strong>을 자동 계산하여 구동 가능한 모델만 매칭합니다.</p>
+          <p class="hf-subtext">SSH 터널로 원격 추론 서버에 물어본 목록입니다. 편집기에서 이 이름을 모델로 고르면 됩니다.</p>
+          <div class="hf-model-list" id="remoteModelList">
+            <div class="hf-loading">SSH 접속 후 표시됩니다.</div>
+          </div>
+        </div>
 
+        <!-- 남은 메모리 기준 참고 목록 -->
+        <div class="hf-recommendation-section">
+          <div class="hf-header">
+            <span class="hf-title">📏 남은 메모리로 돌릴 수 있는 공개 모델(참고)</span>
+            <button class="btn-sm" type="button" onclick="loadHfRecommendations()">↻ 새로고침</button>
+          </div>
+          <p class="hf-subtext">읽어 온 남은 메모리를 공개 모델 8개의 최소 요구량과 비교한 참고표입니다. 모델을 받아 오지는 않습니다.</p>
           <div class="hf-model-list" id="hfModelList">
-            <div class="hf-loading">SSH 연결 후 VRAM이 수집되면 모델이 매칭됩니다.</div>
+            <div class="hf-loading">SSH 접속 후 표시됩니다.</div>
           </div>
         </div>
       </section>
 
     </main>
 
-    <!-- Footer -->
     <footer class="footer">
-      <p>© 2026 GIJO_BridgeAI Corp. - 진짜 SSH2 22번 포트 실시간 GPU 자원 수집 플랫폼</p>
+      <p>© 2026 GIJO_BridgeAI · 비밀번호는 저장하지 않습니다 · 이 화면은 내 PC(localhost)에서만 열립니다</p>
     </footer>
   </div>
 

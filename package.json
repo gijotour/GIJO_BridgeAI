@@ -1,21 +1,62 @@
 {
-  "name": "bridge-ai",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "gijo-bridgeai",
+  "productName": "GIJO BridgeAI",
+  "version": "1.1.0",
+  "description": "노트북에서 원격 GPU 서버에 SSH 로 붙어 GPU 상태를 보고, AI 요청을 SSH 터널로 넘기는 연결 도구",
+  "main": "desktop/main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "desktop": "electron .",
+    "test": "node --test test/server.test.js",
+    "build:win": "electron-builder --win --publish never"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "ssh",
+    "gpu",
+    "ollama",
+    "proxy",
+    "llm"
+  ],
+  "author": "GIJO",
   "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "cors": "^2.8.6",
     "express": "^5.2.1",
     "http-proxy": "^1.18.1",
-    "node-fetch": "^3.3.2",
     "ssh2": "^1.17.0",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.gijo.bridgeai",
+    "productName": "GIJO BridgeAI",
+    "icon": "build/icon.png",
+    "artifactName": "GIJO-BridgeAI-Setup-${version}.${ext}",
+    "files": [
+      "desktop/**/*",
+      "server.js",
+      "public/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "gijotour",
+        "repo": "GIJO_BridgeAI"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
   }
 }

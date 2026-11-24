@@ -1,0 +1,61 @@
+name: Build & Release Windows Installer
+
+# v* 태그를 올리면 Windows 설치 파일을 만들어 GitHub Releases 에 올린다.
+# 설치판은 서명하지 않는다(무료 서명 프로그램 신청이 받아들여지지 않아 서명 없이 배포 — MD Studio 와 같음).
+# 그래서 처음 설치할 때 Windows SmartScreen 경고가 뜰 수 있다. README 「설치」 참고.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag to publish under (e.g. v1.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Exclude workspace from Windows Defender scanning
+        shell: powershell
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+
+      - run: npm ci
+
+      # 설치 파일을 만들기 전에 시험부터 통과해야 한다(가짜 SSH 서버로 터널까지 확인).
+      - run: npm test
+
+      - name: Build Windows installer
+        shell: bash
+        run: npm run build:win 2>&1 | tee build-win.log
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # latest.yml 과 .blockmap 이 설치 파일과 같이 있어야 자동 업데이트가 새 판을 찾는다.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
+          generate_release_notes: true

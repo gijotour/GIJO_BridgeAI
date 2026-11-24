@@ -1,214 +1,226 @@
 let currentStatus = 'disconnected';
-let pollInterval = null;
 let socket = null;
+let lastConnectedHost = null;
+
+const $ = (id) => document.getElementById(id);
+
+/** 화면에 넣는 글자는 모두 이걸 거친다(서버 이름·모델 이름에 < 가 섞여도 깨지지 않게). */
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** 프록시 주소. 서버가 알려 준 값을 쓰고, 받기 전에는 이 화면의 포트로 만든다(포트 3000 이 쓰이면 앱이 다른 포트를 쓴다). */
+let serverProxyUrl = null;
+function proxyBaseUrl() {
+  return serverProxyUrl || `http://127.0.0.1:${window.location.port || 80}/v1`;
+}
 
 document.addEventListener('DOMContentLoaded', () => {
+  $('proxyUrl').innerText = proxyBaseUrl();
   fetchStatus();
   loadHfRecommendations();
-  initWebRtcP2pSocket();
-  pollInterval = setInterval(fetchStatus, 2000);
+  initTelemetrySocket();
+  setInterval(fetchStatus, 2000);
 });
 
-function initWebRtcP2pSocket() {
+function initTelemetrySocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/webrtc-p2p`;
-  
   try {
-    socket = new WebSocket(wsUrl);
+    socket = new WebSocket(`${protocol}//${window.location.host}/webrtc-p2p`);
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === 'telemetry_push') {
-        if (data.hostVram) {
-          updateGpuTelemetryUI(data.hostVram);
-        }
-      }
+      if (data.type === 'telemetry_push' && data.hostVram) updateGpuTelemetryUI(data.hostVram, data.sshRoundTripMs);
     };
   } catch (e) {
-    console.warn('WebSockets fallback');
+    console.warn('실시간 갱신을 못 열어 2초마다 다시 묻습니다');
   }
 }
 
-function updateGpuTelemetryUI(vram) {
-  document.getElementById('gpuName').innerText = vram.gpuName;
-  document.getElementById('gpuArch').innerText = `구조: ${vram.architecture}`;
+function updateGpuTelemetryUI(vram, rttMs) {
+  $('gpuName').innerText = vram.gpuName;
+  $('gpuArch').innerText = `구조: ${vram.architecture}`;
   // 읽지 못한 값은 숫자를 지어내지 않고 '-' 로 둔다.
   const hasTemp = vram.temperature !== null && vram.temperature !== undefined;
-  document.getElementById('valTemp').innerText = hasTemp ? `${vram.temperature} °C` : '-';
+  $('valTemp').innerText = hasTemp ? `${vram.temperature} °C` : '-';
+  if (rttMs !== undefined) $('valRtt').innerText = rttMs != null ? `${rttMs} ms` : '-';
+
+  const unified = vram.memoryKind === 'unified';
+  $('memLabel').innerText = unified ? '통합 메모리 사용량 (GPU·CPU 공용)' : 'GPU 메모리(VRAM) 사용량';
+  $('freeLabel').innerText = unified ? '남은 통합 메모리' : '남은 VRAM';
 
   const known = vram.totalGB > 0;
-  const freeVram = known ? (vram.freeGB || (vram.totalGB - vram.usedGB).toFixed(1)) : '-';
-  document.getElementById('valFreeVram').innerText = known ? `${freeVram} GB` : '-';
-
-  const used = vram.usedGB;
-  const total = vram.totalGB;
-  const pct = total > 0 ? ((used / total) * 100).toFixed(1) : 0;
-
-  document.getElementById('vramText').innerText = known
-    ? `${used} GB / ${total} GB (남은 용량: ${freeVram} GB)`
-    : '용량 확인 불가';
-  document.getElementById('vramProgress').style.width = `${pct}%`;
+  const pct = known ? ((vram.usedGB / vram.totalGB) * 100).toFixed(1) : 0;
+  $('valFreeVram').innerText = known ? `${vram.freeGB} GB` : '-';
+  $('vramText').innerText = known ? `${vram.usedGB} GB / ${vram.totalGB} GB (남은 용량: ${vram.freeGB} GB)` : '용량 확인 불가';
+  $('vramProgress').style.width = `${pct}%`;
 }
 
 async function fetchStatus() {
   try {
     const res = await fetch('/api/bridge/status');
-    const data = await res.json();
-    updateUI(data);
+    updateUI(await res.json());
   } catch (err) {
-    console.error('Failed to fetch status:', err);
+    console.error('상태를 읽지 못했습니다:', err);
   }
 }
 
 function updateUI(data) {
   currentStatus = data.status;
-
-  const statusDot = document.getElementById('statusDot');
-  const statusTitle = document.getElementById('statusTitle');
-  const statusSub = document.getElementById('statusSub');
-  const btnConnect = document.getElementById('btnConnect');
-  const userAuthTag = document.getElementById('userAuthTag');
-  const valAuthStatus = document.getElementById('valAuthStatus');
+  if (data.proxyBaseUrl && data.proxyBaseUrl !== serverProxyUrl) {
+    serverProxyUrl = data.proxyBaseUrl;
+    $('proxyUrl').innerText = serverProxyUrl;
+  }
+  const btnConnect = $('btnConnect');
 
   if (data.status === 'connected') {
-    statusDot.className = 'status-indicatorConnected';
-    statusTitle.innerText = `원격 GPU 서버 (${data.hostIp}) SSH2 연결 성공`;
-    statusSub.innerText = `SSH 계정(${data.authSession.username}) 접속 완료 · 5초마다 다시 읽습니다${data.latency != null ? ` · SSH 왕복 ${data.latency} ms` : ''}`;
-    btnConnect.innerText = '🔌 SSH2 접속 끊기';
+    const s = data.authSession;
+    $('statusDot').className = 'status-indicatorConnected';
+    $('statusTitle').innerText = `원격 서버 (${data.hostIp}) 연결됨`;
+    $('statusSub').innerText = `${s.username} · ${s.authMethod === 'key' ? 'SSH 키' : '비밀번호'} 로그인 · 추론 서버 포트 ${s.inferencePort} · 5초마다 다시 읽습니다`;
+    btnConnect.innerText = '🔌 SSH 접속 끊기';
     btnConnect.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)';
-    userAuthTag.innerText = `SSH2: ${data.authSession.username} (연결됨)`;
-    valAuthStatus.innerText = 'SSH2 연결됨';
-    valAuthStatus.className = 'stat-value text-green';
+    $('userAuthTag').innerText = `${s.username}@${data.hostIp}`;
+    $('valAuthStatus').innerText = '연결됨';
+    $('valAuthStatus').className = 'stat-value text-green';
+    if (lastConnectedHost !== data.hostIp) {
+      lastConnectedHost = data.hostIp;
+      loadRemoteModels();
+    }
   } else if (data.status === 'connecting') {
-    statusDot.className = 'status-indicatorDisconnected';
-    statusTitle.innerText = '원격 GPU 서버 22번 포트 접속 중...';
-    statusSub.innerText = 'SSH2 패킷 핸드셰이크 및 명령어(nvidia-smi) 실행 중입니다';
-    btnConnect.innerText = '⏳ SSH2 접속 및 자원 읽는 중...';
+    $('statusDot').className = 'status-indicatorDisconnected';
+    $('statusTitle').innerText = '원격 서버에 접속하는 중…';
+    $('statusSub').innerText = 'SSH 로그인 뒤 nvidia-smi 로 GPU 상태를 읽습니다';
+    btnConnect.innerText = '⏳ 접속하는 중…';
   } else {
-    statusDot.className = 'status-indicatorDisconnected';
-    statusTitle.innerText = '진짜 SSH 미연결';
-    statusSub.innerText = '원격 서버 주소와 SSH 계정을 입력해 접속하세요';
-    btnConnect.innerText = '🔑 진짜 SSH 접속 및 실시간 GPU 자원 읽어오기';
+    $('statusDot').className = 'status-indicatorDisconnected';
+    $('statusTitle').innerText = 'SSH 미연결';
+    $('statusSub').innerText = '원격 서버 주소와 SSH 계정을 입력해 접속하세요';
+    btnConnect.innerText = '🔑 SSH 접속하고 GPU 상태 읽기';
     btnConnect.style.background = 'linear-gradient(135deg, var(--primary), var(--accent-cyan))';
-    userAuthTag.innerText = 'SSH2 세션 미연결';
-    valAuthStatus.innerText = '미연결';
-    valAuthStatus.className = 'stat-value text-red';
+    $('userAuthTag').innerText = 'SSH 미연결';
+    $('valAuthStatus').innerText = '미연결';
+    $('valAuthStatus').className = 'stat-value text-red';
+    if (lastConnectedHost) {
+      lastConnectedHost = null;
+      $('remoteModelList').innerHTML = '<div class="hf-loading">SSH 접속 후 표시됩니다.</div>';
+    }
   }
 
-  if (data.hostVram) {
-    updateGpuTelemetryUI(data.hostVram);
+  if (data.hostVram) updateGpuTelemetryUI(data.hostVram, data.latency);
+}
+
+async function loadRemoteModels() {
+  const box = $('remoteModelList');
+  box.innerHTML = '<div class="hf-loading">원격 추론 서버에 묻는 중…</div>';
+  try {
+    const data = await (await fetch('/api/bridge/remote-models')).json();
+    if (!data.connected) {
+      box.innerHTML = '<div class="hf-loading">SSH 접속 후 표시됩니다.</div>';
+      return;
+    }
+    if (data.error) {
+      box.innerHTML = `<div class="text-red">${esc(data.error)}</div><div class="text-muted">원격 서버에서 추론 서버(예: ollama serve)가 떠 있는지, 포트가 맞는지 확인하세요.</div>`;
+      return;
+    }
+    if (!data.models.length) {
+      box.innerHTML = `<div class="text-muted">추론 서버(${esc(data.server)})는 답했지만 받아 둔 모델이 없습니다. 원격 서버에서 모델을 먼저 받아 주세요(예: ollama pull qwen3:8b).</div>`;
+      return;
+    }
+    box.innerHTML = data.models.map((m) => `
+      <div class="hf-card fit">
+        <div class="hf-card-left">
+          <div class="hf-model-name">${esc(m.name)}</div>
+          <div class="hf-tags">
+            ${m.parameterSize ? `<span class="hf-tag">${esc(m.parameterSize)}</span>` : ''}
+            ${m.quantization ? `<span class="hf-tag">${esc(m.quantization)}</span>` : ''}
+            ${m.sizeGB != null ? `<span class="hf-tag-vram">${esc(m.sizeGB)} GB</span>` : ''}
+          </div>
+        </div>
+        <div class="hf-card-right">
+          <button class="btn-hf-load" type="button" data-model="${esc(m.name)}" onclick="copyModelName(this.dataset.model)">이름 복사</button>
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="text-red">모델 목록을 읽지 못했습니다.</div>';
   }
 }
 
 async function loadHfRecommendations() {
-  const container = document.getElementById('hfModelList');
-
+  const container = $('hfModelList');
   try {
-    const res = await fetch('/api/bridge/huggingface-recommendations');
-    const data = await res.json();
-
+    const data = await (await fetch('/api/bridge/huggingface-recommendations')).json();
     if (!data.recommendations || data.recommendations.length === 0) {
-      container.innerHTML = '<div class="text-muted">SSH2로 접속된 자원이 없습니다. 계정을 입력해 연결하세요.</div>';
+      container.innerHTML = '<div class="text-muted">SSH 접속 후 표시됩니다.</div>';
       return;
     }
-
-    container.innerHTML = '';
-    data.recommendations.forEach(model => {
-      const card = document.createElement('div');
-      card.className = `hf-card ${model.isFit ? 'fit' : 'unfit'}`;
-
-      card.innerHTML = `
+    container.innerHTML = data.recommendations.map((model) => `
+      <div class="hf-card ${model.isFit ? 'fit' : 'unfit'}">
         <div class="hf-card-left">
-          <div class="hf-model-name">${model.name}</div>
-          <div class="hf-model-repo">${model.repo}</div>
+          <div class="hf-model-name">${esc(model.name)}</div>
+          <div class="hf-model-repo">${esc(model.repo)}</div>
           <div class="hf-tags">
-            ${model.tags.map(t => `<span class="hf-tag">${t}</span>`).join('')}
-            <span class="hf-tag-vram">최소 VRAM: ${model.reqVramGB} GB</span>
+            ${model.tags.map((t) => `<span class="hf-tag">${esc(t)}</span>`).join('')}
+            <span class="hf-tag-vram">최소 ${esc(model.reqVramGB)} GB</span>
           </div>
         </div>
         <div class="hf-card-right">
-          <div class="hf-status-text ${model.isFit ? 'text-green' : 'text-red'}">${model.vramStatusText}</div>
-          ${model.isFit ? `<button class="btn-hf-load" onclick="loadModelToHost('${model.id}', '${model.name}')">원클릭 로드</button>` : `<button class="btn-hf-disabled" disabled>VRAM 부족</button>`}
+          <div class="hf-status-text ${model.isFit ? 'text-green' : 'text-red'}">${esc(model.vramStatusText)}</div>
         </div>
-      `;
-      container.appendChild(card);
-    });
+      </div>`).join('');
   } catch (e) {
-    container.innerHTML = '<div class="text-red">SSH 자원 수집 대기 중</div>';
-  }
-}
-
-async function loadModelToHost(modelId, modelName) {
-  if (!confirm(`[GIJO_BridgeAI SSH2]\n\n${modelName} 모델을 SSH로 원격 AI 서버 GPU VRAM에 배포하시겠습니까?`)) {
-    return;
-  }
-
-  try {
-    const res = await fetch('/api/bridge/load-hf-model', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelId, modelName })
-    });
-    const result = await res.json();
-    alert(result.message);
-    fetchStatus();
-    loadHfRecommendations();
-  } catch (e) {
-    alert('모델 배포 오류');
+    container.innerHTML = '<div class="text-red">참고표를 읽지 못했습니다.</div>';
   }
 }
 
 async function toggleConnect() {
-  const hostIp = document.getElementById('inputHostIp').value;
-  const port = document.getElementById('inputPort').value || 22;
-  const username = document.getElementById('inputUsername').value;
-  const password = document.getElementById('inputPassword').value;
-
   if (currentStatus === 'connected') {
     await fetch('/api/bridge/disconnect', { method: 'POST' });
-  } else {
-    if (!hostIp || !username || !password) {
-      alert('원격 서버 주소, SSH 계정 ID, 비밀번호를 입력해주세요!');
-      return;
-    }
+    fetchStatus();
+    loadHfRecommendations();
+    return;
+  }
 
-    updateUI({ status: 'connecting', hostIp, authSession: { username }, hostVram: {} });
-    
-    try {
-      const res = await fetch('/api/bridge/auth-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hostIp, port, username, password })
-      });
-      const data = await res.json();
-      
-      if (data.success) {
-        alert(data.message);
-      } else {
-        alert(data.error || 'SSH 접속에 실패했습니다.');
-      }
-    } catch (e) {
-      alert(`[SSH 접속 에러] ${hostIp}:${port} 서버와 통신할 수 없습니다.`);
-    }
+  const hostIp = $('inputHostIp').value.trim();
+  const port = $('inputPort').value.trim() || 22;
+  const username = $('inputUsername').value.trim();
+  const password = $('inputPassword').value;
+  const privateKeyPath = $('inputKeyPath').value.trim();
+  const passphrase = $('inputPassphrase').value;
+  const inferencePort = $('inputInferencePort').value.trim() || 11434;
+
+  if (!hostIp || !username || (!password && !privateKeyPath)) {
+    alert('원격 서버 주소와 계정 ID, 그리고 비밀번호나 SSH 키 파일 경로를 입력해 주세요.');
+    return;
+  }
+
+  updateUI({ status: 'connecting', hostIp, authSession: { username }, hostVram: null });
+  try {
+    const res = await fetch('/api/bridge/auth-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostIp, port, username, password, privateKeyPath, passphrase, inferencePort })
+    });
+    const data = await res.json();
+    // 비밀번호와 키 암호는 화면에도 남기지 않는다.
+    $('inputPassword').value = '';
+    $('inputPassphrase').value = '';
+    if (!data.success) alert(`${data.error || 'SSH 접속에 실패했습니다.'}${data.suggestion ? `\n\n${data.suggestion}` : ''}`);
+  } catch (e) {
+    alert(`${hostIp}:${port} 에 접속하지 못했습니다.`);
   }
   fetchStatus();
   loadHfRecommendations();
 }
 
-async function switchMode(mode) {
-  document.getElementById('btnModeClient').classList.toggle('active', mode === 'client');
-  document.getElementById('btnModeHost').classList.toggle('active', mode === 'host');
-  
-  await fetch('/api/bridge/mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode })
-  });
-
-  fetchStatus();
-  loadHfRecommendations();
+function copyText(text, message) {
+  navigator.clipboard.writeText(text).then(() => alert(message), () => prompt('복사하지 못했습니다. 직접 복사하세요:', text));
 }
 
 function copyProxyUrl() {
-  navigator.clipboard.writeText('http://localhost:3000/v1');
-  alert('로컬 프록시 주소 (http://localhost:3000/v1) 가 복사되었습니다!\nVS Code Continue, Cursor, Python 딥러닝 코드의 Base URL에 붙여넣으시면 SSH 접속된 원격 GPU 자원으로 자동 오프로드됩니다.');
+  const url = proxyBaseUrl();
+  copyText(url, `로컬 프록시 주소(${url})를 복사했습니다.\n편집기나 파이썬 코드의 Base URL 에 붙여 넣으세요. API 키를 물으면 아무 값이나 넣어도 됩니다.`);
+}
+
+function copyModelName(name) {
+  copyText(name, `모델 이름(${name})을 복사했습니다.`);
 }
